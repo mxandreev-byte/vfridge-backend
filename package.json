@@ -1,0 +1,17 @@
+{
+  "name": "vfridge-backend",
+  "version": "1.0.0",
+  "description": "Backend proxy for Виртуальный холодильник — GigaChat integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "cors": "^2.8.5"
+  }
+}
