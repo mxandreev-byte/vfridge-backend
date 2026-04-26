@@ -22,23 +22,34 @@ const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = [
   'https://v-fridge.ru',
   'http://v-fridge.ru',
+  'https://www.v-fridge.ru',
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:5500',
   'null', // file:// для локального тестирования
 ];
 
+// Расширенная конфигурация CORS — критично для iOS Safari
 app.use(cors({
   origin: (origin, callback) => {
-    // Разрешаем без origin (curl, Postman) и из whitelist
+    // Разрешаем без origin (curl, Postman, нативные приложения) и из whitelist
     if (!origin || ALLOWED_ORIGINS.includes(origin)) {
       callback(null, true);
     } else {
-      console.warn('CORS blocked:', origin);
-      callback(null, true); // Пока не блокируем для тестов — поменять в проде
+      console.warn('CORS allowed (with warning):', origin);
+      callback(null, true); // Пока не блокируем для тестов
     }
   },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Origin', 'X-Requested-With'],
+  credentials: false,
+  maxAge: 86400, // кэш preflight на 24 часа
+  optionsSuccessStatus: 200, // Safari иногда не понимает 204
 }));
+
+// Явный обработчик OPTIONS (preflight) — iOS Safari иногда падает без него
+app.options('*', cors());
+
 app.use(express.json({ limit: '10kb' }));
 
 // === Простой rate limit (in-memory) ===
