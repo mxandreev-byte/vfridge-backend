@@ -50,7 +50,23 @@ app.use(cors({
 // Явный обработчик OPTIONS (preflight) — iOS Safari иногда падает без него
 app.options('*', cors());
 
+// Парсим JSON в теле запроса
+// Принимаем И application/json, И text/plain (последнее нужно чтобы избежать
+// CORS preflight на iOS Safari — клиент шлёт JSON но с Content-Type: text/plain)
 app.use(express.json({ limit: '10kb' }));
+app.use(express.text({ limit: '10kb', type: ['text/plain', 'text/*'] }));
+
+// Middleware: если пришёл text/plain — парсим его как JSON
+app.use((req, res, next) => {
+  if (typeof req.body === 'string' && req.body.length > 0) {
+    try {
+      req.body = JSON.parse(req.body);
+    } catch (e) {
+      return res.status(400).json({ error: 'Невалидный JSON в теле запроса' });
+    }
+  }
+  next();
+});
 
 // === Простой rate limit (in-memory) ===
 // Защита от спама — 30 запросов в минуту с одного IP
