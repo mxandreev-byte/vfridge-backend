@@ -316,9 +316,114 @@ app.post('/api/chef-suggest', rateLimit, async (req, res) => {
   }
 });
 
+// === FEEDBACK: приём отзывов и пересылка в Google Sheets ===
+app.post('/api/feedback', rateLimit, async (req, res) => {
+  try {
+    const data = req.body;
+
+    // Базовая валидация
+    if (!data || typeof data !== 'object') {
+      return res.status(400).json({ error: 'Невалидные данные' });
+    }
+    // Требуем хотя бы одну звёздочку
+    if (!data.ratingOverall || data.ratingOverall < 1) {
+      return res.status(400).json({ error: 'Поставьте оценку приложению' });
+    }
+
+    // Чистим и ограничиваем длины полей
+    const clean = {
+      ratingOverall: Math.min(5, Math.max(1, parseInt(data.ratingOverall) || 0)),
+      ratingUsage:   Math.min(5, Math.max(0, parseInt(data.ratingUsage) || 0)),
+      ratingEase:    Math.min(5, Math.max(0, parseInt(data.ratingEase) || 0)),
+      likes:         Array.isArray(data.likes) ? data.likes.slice(0, 10).map(s => String(s).slice(0, 50)) : [],
+      improvements:  String(data.improvements || '').slice(0, 1000),
+      missingItems:  String(data.missingItems || '').slice(0, 500),
+      wishes:        String(data.wishes || '').slice(0, 1000),
+      contact:       String(data.contact || '').slice(0, 100),
+      userAgent:     String(req.headers['user-agent'] || '').slice(0, 200),
+      timestamp:     new Date().toISOString(),
+    };
+
+    console.log(`[feedback] rating: ${clean.ratingOverall}/5, contact: ${clean.contact || 'аноним'}`);
+
+    // Шлём в Google Sheets через Apps Script Web App
+    const sheetsUrl = process.env.GOOGLE_SHEETS_WEBHOOK_URL;
+    if (sheetsUrl) {
+      try {
+        await sendToGoogleSheets(sheetsUrl, clean);
+      } catch (sheetsError) {
+        console.error('[feedback] Sheets error:', sheetsError.message);
+        // Не падаем — фидбек принят, просто логируем что в Sheets не доехало
+      }
+    } else {
+      console.warn('[feedback] GOOGLE_SHEETS_WEBHOOK_URL не настроен — данные просто в логе:', JSON.stringify(clean));
+    }
+
+    res.json({ success: true, message: 'Спасибо за отзыв!' });
+  } catch (error) {
+    console.error('[feedback] error:', error.message);
+    res.status(500).json({
+      error: 'Не удалось отправить отзыв. Попробуйте ещё раз.',
+    });
+  }
+});
+
+// Отправка данных в Google Apps Script Web App
+function sendToGoogleSheets(url, data) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const body = JSON.stringify(data);
+
+    const reqOptions = {
+      hostname: u.hostname,
+      port: u.port || 443,
+      path: u.pathname + u.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    };
+
+    const request = https.request(reqOptions, (response) => {
+      // Apps Script делает редирект на googleusercontent — следуем за ним
+      if ([301, 302, 307, 308].includes(response.statusCode) && response.headers.location) {
+        const redirectUrl = response.headers.location;
+        const ru = new URL(redirectUrl);
+        const redirectReq = https.request({
+          hostname: ru.hostname,
+          port: ru.port || 443,
+          path: ru.pathname + ru.search,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        }, (r) => {
+          let resData = '';
+          r.on('data', (c) => resData += c);
+          r.on('end', () => resolve(resData));
+        });
+        redirectReq.on('error', reject);
+        redirectReq.setTimeout(15_000);
+        redirectReq.write(body);
+        redirectReq.end();
+        return;
+      }
+
+      let resData = '';
+      response.on('data', (c) => resData += c);
+      response.on('end', () => resolve(resData));
+    });
+
+    request.on('error', reject);
+    request.setTimeout(15_000, () => request.destroy(new Error('Таймаут отправки в Sheets')));
+    request.write(body);
+    request.end();
+  });
+}
+
 // === Запуск ===
 app.listen(PORT, () => {
   console.log(`🌿 Virtual Fridge backend запущен на порту ${PORT}`);
   console.log(`   Health: http://localhost:${PORT}/health`);
   console.log(`   GigaChat key: ${process.env.GIGACHAT_AUTH_KEY ? 'настроен ✓' : 'НЕ НАСТРОЕН ✗'}`);
+  console.log(`   Sheets webhook: ${process.env.GOOGLE_SHEETS_WEBHOOK_URL ? 'настроен ✓' : 'не настроен (фидбек будет только в логах)'}`);
 });
