@@ -228,6 +228,85 @@ async function generateRecipe(productNames, mode = 'auto') {
   };
 }
 
+// === GigaChat: вопрос ШЕФА по конкретному рецепту ===
+// Принимает контекст рецепта + вопрос пользователя, возвращает текстовый ответ
+async function askChefAboutRecipe(recipeContext, userQuestion, history = []) {
+  const token = await getGigaChatToken();
+
+  const systemPrompt = `Ты — опытный, дружелюбный шеф-повар-наставник. Помогаешь готовить конкретное блюдо, отвечаешь на вопросы о рецепте.
+
+КОНТЕКСТ РЕЦЕПТА (текущий рецепт пользователя):
+Название: ${recipeContext.name}
+Кухня: ${recipeContext.cuisine || 'не указано'}
+Время: ${recipeContext.time} минут
+Порций: ${recipeContext.servings}
+Сложность: ${recipeContext.difficulty || 'medium'}
+
+Ингредиенты:
+${(recipeContext.ingredients || []).map(i => `- ${i.name}${i.amount ? ': ' + i.amount : ''}${i.optional ? ' (опционально)' : ''}`).join('\n')}
+
+Шаги приготовления:
+${(recipeContext.steps || []).map((s, i) => `${i+1}. ${s}`).join('\n')}
+
+ПРАВИЛА ОТВЕТА:
+1. Отвечай КРАТКО и по делу — 1-3 коротких абзаца, не больше
+2. Без формальностей и преамбул типа "Хороший вопрос!" или "Конечно, расскажу"
+3. Используй простые понятные слова, не профессиональный жаргон
+4. Если вопрос про замены ингредиентов — давай 1-2 конкретных варианта с пропорциями
+5. Если вопрос про пересчёт порций — давай точные количества для каждого ингредиента
+6. Если просят упростить — предлагай конкретные шаги к упрощению
+7. Если не знаешь точно — честно скажи "лучше уточни в проверенном источнике"
+8. Не отклоняйся от темы рецепта — если спрашивают про другое блюдо, мягко верни к этому рецепту
+9. Не используй markdown-форматирование (не нужны ** или ##), пиши простым текстом
+10. Тон тёплый, но без излишней приторности
+
+Отвечай только на русском языке.`;
+
+  // Собираем историю диалога
+  const messages = [
+    { role: 'system', content: systemPrompt },
+  ];
+
+  // Добавляем предыдущие сообщения из истории (если есть)
+  for (const item of history.slice(-6)) { // последние 6 сообщений (3 пары)
+    if (item.role === 'user' || item.role === 'assistant') {
+      messages.push({
+        role: item.role,
+        content: String(item.content || '').slice(0, 1000),
+      });
+    }
+  }
+
+  // Текущий вопрос
+  messages.push({ role: 'user', content: userQuestion });
+
+  const requestBody = {
+    model: 'GigaChat-2',
+    messages,
+    temperature: 0.4, // ниже чем у генератора рецептов — здесь нужны точные ответы
+    max_tokens: 600,
+  };
+
+  const response = await fetchJson('https://gigachat.devices.sberbank.ru/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  let text = response.choices?.[0]?.message?.content || '';
+  text = String(text).trim();
+
+  if (!text) {
+    throw new Error('Шеф ничего не ответил. Попробуйте перефразировать вопрос.');
+  }
+
+  return { answer: text };
+}
+
 // === Обёртка над fetch с поддержкой Node.js < 18 ===
 // В Node 18+ fetch встроен, но для надёжности и SSL-настроек используем https напрямую для ngw
 function fetchJson(url, options = {}) {
@@ -311,6 +390,58 @@ app.post('/api/chef-suggest', rateLimit, async (req, res) => {
     console.error('[chef-suggest] error:', error.message);
     res.status(500).json({
       error: 'Не удалось сгенерировать рецепт. Попробуйте ещё раз.',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+    });
+  }
+});
+
+// === RECIPE-HELP: вопрос ШЕФА по конкретному рецепту ===
+app.post('/api/recipe-help', rateLimit, async (req, res) => {
+  try {
+    const { recipe, question, history } = req.body;
+
+    // Валидация
+    if (!recipe || typeof recipe !== 'object' || !recipe.name) {
+      return res.status(400).json({ error: 'Не передан контекст рецепта' });
+    }
+    if (!question || typeof question !== 'string' || question.trim().length === 0) {
+      return res.status(400).json({ error: 'Пустой вопрос' });
+    }
+    if (question.length > 500) {
+      return res.status(400).json({ error: 'Слишком длинный вопрос. Сократите до 500 символов.' });
+    }
+
+    // Чистим контекст
+    const cleanRecipe = {
+      name: String(recipe.name || '').slice(0, 100),
+      cuisine: String(recipe.cuisine || '').slice(0, 50),
+      time: parseInt(recipe.time) || 30,
+      servings: parseInt(recipe.servings) || 2,
+      difficulty: String(recipe.difficulty || 'medium').slice(0, 20),
+      ingredients: Array.isArray(recipe.ingredients)
+        ? recipe.ingredients.slice(0, 30).map(i => ({
+            name: String(i.name || '').slice(0, 50),
+            amount: i.amount ? String(i.amount).slice(0, 30) : '',
+            optional: !!i.optional,
+          }))
+        : [],
+      steps: Array.isArray(recipe.steps)
+        ? recipe.steps.slice(0, 20).map(s => String(s).slice(0, 300))
+        : [],
+    };
+
+    const cleanHistory = Array.isArray(history) ? history.slice(-10) : [];
+
+    console.log(`[recipe-help] recipe: "${cleanRecipe.name}", question: "${question.slice(0, 60)}..."`);
+
+    const result = await askChefAboutRecipe(cleanRecipe, question.trim(), cleanHistory);
+
+    console.log(`[recipe-help] answer length: ${result.answer.length}`);
+    res.json(result);
+  } catch (error) {
+    console.error('[recipe-help] error:', error.message);
+    res.status(500).json({
+      error: 'Шеф задумался слишком надолго. Попробуйте ещё раз.',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined,
     });
   }
