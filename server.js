@@ -132,7 +132,7 @@ async function getGigaChatToken() {
 }
 
 // === GigaChat: запрос на генерацию рецепта ===
-async function generateRecipe(productNames, mode = 'auto') {
+async function generateRecipe(productNames, mode = 'auto', lentMode = false) {
   const token = await getGigaChatToken();
 
   // Определяем роль и инструкции в зависимости от mode
@@ -153,9 +153,23 @@ async function generateRecipe(productNames, mode = 'auto') {
     contextHint = 'Подумай, что лучше получится из этих продуктов: блюдо или напиток. Если есть алкоголь, соки, газировка, сиропы и фрукты — скорее всего, человек хочет коктейль или лимонад. Если есть мясо, овощи, крупы — хочет полноценное блюдо. Принимай решение сам.';
   }
 
+  // Дополнительные правила для постного режима
+  let lentSection = '';
+  let lentJsonField = '';
+  if (lentMode) {
+    lentSection = `
+
+⛪ ВАЖНО — ПОСТНЫЙ РЕЖИМ! Рецепт должен быть СТРОГО ПОСТНЫМ:
+- НЕЛЬЗЯ использовать: мясо, птицу, рыбу, морепродукты, икру, яйца, любые молочные продукты (молоко, сметану, сыр, творог, йогурт, кефир, сливочное масло, сливки), мёд
+- МОЖНО: овощи, фрукты, грибы, крупы, бобовые, орехи, хлеб, специи, растительное масло, вода, сахар
+- Если из предоставленных продуктов невозможно собрать постное блюдо (например, есть только мясо и сыр) — напиши в поле "name": "Невозможно приготовить постное блюдо"
+- Если рецепт постный — ОБЯЗАТЕЛЬНО ставь в JSON "lent": true`;
+    lentJsonField = ',\n  "lent": true';
+  }
+
   const systemPrompt = `${roleIntro}
 
-КОНТЕКСТ: ${contextHint}
+КОНТЕКСТ: ${contextHint}${lentSection}
 
 ПРАВИЛА:
 1. Используй ТОЛЬКО продукты из списка + базовые специи и добавки (соль, перец, растительное масло, вода, лёд) — больше ничего предлагать нельзя.
@@ -180,7 +194,7 @@ async function generateRecipe(productNames, mode = 'auto') {
   "cuisine": "название кухни",
   "description": "одно предложение что это за рецепт и почему он подходит",
   "used": [{"name": "Помидор", "amount": "2 шт"}, {"name": "Сыр", "amount": "100 г"}],
-  "steps": ["шаг 1", "шаг 2", "..."]
+  "steps": ["шаг 1", "шаг 2", "..."]${lentJsonField}
 }`;
 
   const userPrompt = `У меня есть: ${productNames.join(', ')}.
@@ -363,9 +377,10 @@ app.get('/health', (req, res) => {
 
 app.post('/api/chef-suggest', rateLimit, async (req, res) => {
   try {
-    const { products, mode } = req.body;
+    const { products, mode, lentMode } = req.body;
     // mode может быть 'auto' (по умолчанию), 'food' или 'drink'
     const validMode = ['auto', 'food', 'drink'].includes(mode) ? mode : 'auto';
+    const isLent = lentMode === true;
 
     if (!Array.isArray(products) || products.length === 0) {
       return res.status(400).json({ error: 'Передайте список продуктов в поле "products"' });
@@ -382,9 +397,9 @@ app.post('/api/chef-suggest', rateLimit, async (req, res) => {
       return res.status(400).json({ error: 'Список продуктов пуст' });
     }
 
-    console.log(`[chef-suggest] products: ${cleanProducts.join(', ')}, mode: ${validMode}`);
-    const recipe = await generateRecipe(cleanProducts, validMode);
-    console.log(`[chef-suggest] result: ${recipe.name} (${recipe.type || 'food'})`);
+    console.log(`[chef-suggest] products: ${cleanProducts.join(', ')}, mode: ${validMode}${isLent ? ', LENT' : ''}`);
+    const recipe = await generateRecipe(cleanProducts, validMode, isLent);
+    console.log(`[chef-suggest] result: ${recipe.name} (${recipe.type || 'food'})${recipe.lent ? ' [пост]' : ''}`);
 
     res.json({ recipe });
   } catch (error) {
