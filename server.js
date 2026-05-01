@@ -132,7 +132,7 @@ async function getGigaChatToken() {
 }
 
 // === GigaChat: запрос на генерацию рецепта ===
-async function generateRecipe(productNames, mode = 'auto', lentMode = false) {
+async function generateRecipe(productNames, mode = 'auto', lentMode = false, recipeName = '') {
   const token = await getGigaChatToken();
 
   // Определяем роль и инструкции в зависимости от mode
@@ -141,7 +141,13 @@ async function generateRecipe(productNames, mode = 'auto', lentMode = false) {
   // 'drink' — только напиток / коктейль
   let roleIntro, contextHint;
 
-  if (mode === 'drink') {
+  // Если запрошено конкретное название — это другой режим целиком
+  const hasRecipeName = recipeName && recipeName.trim().length > 0;
+
+  if (hasRecipeName) {
+    roleIntro = `Ты — опытный шеф-повар И бармен. Пользователь хочет приготовить конкретное блюдо: "${recipeName.trim()}". Твоя задача — дать рецепт этого блюда, максимально используя продукты которые УЖЕ ЕСТЬ у пользователя.`;
+    contextHint = `Главное: сделать запрошенный рецепт "${recipeName.trim()}" максимально близко к классическому варианту, но с разумными адаптациями под доступные продукты пользователя. Если каких-то продуктов критически не хватает (например для борща нужна свёкла) — всё равно дай рецепт и упомяни эти ингредиенты в "used" с количествами. Пользователь сам разберётся что докупить — у нас есть список покупок.`;
+  } else if (mode === 'drink') {
     roleIntro = 'Ты — опытный бармен. Тебе дают список продуктов и напитков из холодильника пользователя — ты должен предложить ОДИН конкретный напиток или коктейль, который можно из них приготовить.';
     contextHint = 'Это должен быть НАПИТОК (коктейль, лимонад, смузи, морс, мокктейль и т.п.), а не блюдо.';
   } else if (mode === 'food') {
@@ -167,12 +173,26 @@ async function generateRecipe(productNames, mode = 'auto', lentMode = false) {
     lentJsonField = ',\n  "lent": true';
   }
 
+  // Правила для случая когда задано имя рецепта
+  let nameSection = '';
+  if (hasRecipeName) {
+    nameSection = `
+
+📝 ВАЖНО — ЗАПРОС НА КОНКРЕТНОЕ БЛЮДО:
+- Пользователь конкретно просит: "${recipeName.trim()}"
+- Дай рецепт ИМЕННО этого блюда (классический или близкий к нему)
+- В поле "name" — название должно быть таким же или близким к "${recipeName.trim()}"
+- В "used" укажи ВСЕ ингредиенты которые нужны для рецепта (даже те которых нет у пользователя)
+- В описании можно упомянуть какие продукты пользователю докупить
+- Если запрошенное блюдо невозможно приготовить (например пользователь спрашивает "молочный коктейль" в постном режиме) — напиши в "name": "Невозможно приготовить"`;
+  }
+
   const systemPrompt = `${roleIntro}
 
-КОНТЕКСТ: ${contextHint}${lentSection}
+КОНТЕКСТ: ${contextHint}${lentSection}${nameSection}
 
 ПРАВИЛА:
-1. Используй ТОЛЬКО продукты из списка + базовые специи и добавки (соль, перец, растительное масло, вода, лёд) — больше ничего предлагать нельзя.
+1. ${hasRecipeName ? 'Используй ингредиенты которые требуются для рецепта (даже если их нет у пользователя — укажи в "used"). Базовые специи и масла можно не уточнять.' : 'Используй ТОЛЬКО продукты из списка + базовые специи и добавки (соль, перец, растительное масло, вода, лёд) — больше ничего предлагать нельзя.'}
 2. Результат должен быть СЪЕДОБНЫМ/ВКУСНЫМ и ЛОГИЧНЫМ — никакой кулинарной или барной ереси.
 3. Если из этих продуктов невозможно приготовить осмысленный рецепт — честно скажи об этом в поле "name", напиши: "Невозможно приготовить".
 4. Время — реалистичное (для напитков 2-15 минут, для блюд 10-90 минут).
@@ -377,10 +397,14 @@ app.get('/health', (req, res) => {
 
 app.post('/api/chef-suggest', rateLimit, async (req, res) => {
   try {
-    const { products, mode, lentMode } = req.body;
+    const { products, mode, lentMode, recipeName } = req.body;
     // mode может быть 'auto' (по умолчанию), 'food' или 'drink'
     const validMode = ['auto', 'food', 'drink'].includes(mode) ? mode : 'auto';
     const isLent = lentMode === true;
+    // Чистим recipeName на всякий случай
+    const cleanRecipeName = (typeof recipeName === 'string')
+      ? recipeName.trim().slice(0, 100)
+      : '';
 
     if (!Array.isArray(products) || products.length === 0) {
       return res.status(400).json({ error: 'Передайте список продуктов в поле "products"' });
@@ -397,8 +421,12 @@ app.post('/api/chef-suggest', rateLimit, async (req, res) => {
       return res.status(400).json({ error: 'Список продуктов пуст' });
     }
 
-    console.log(`[chef-suggest] products: ${cleanProducts.join(', ')}, mode: ${validMode}${isLent ? ', LENT' : ''}`);
-    const recipe = await generateRecipe(cleanProducts, validMode, isLent);
+    const logExtras = [
+      isLent ? 'LENT' : '',
+      cleanRecipeName ? `name="${cleanRecipeName}"` : '',
+    ].filter(Boolean).join(', ');
+    console.log(`[chef-suggest] products: ${cleanProducts.join(', ')}, mode: ${validMode}${logExtras ? ', ' + logExtras : ''}`);
+    const recipe = await generateRecipe(cleanProducts, validMode, isLent, cleanRecipeName);
     console.log(`[chef-suggest] result: ${recipe.name} (${recipe.type || 'food'})${recipe.lent ? ' [пост]' : ''}`);
 
     res.json({ recipe });
