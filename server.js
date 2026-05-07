@@ -595,10 +595,59 @@ function sendToGoogleSheets(url, data) {
   });
 }
 
+// === ФОТО РЕЦЕПТА (Unsplash) ===
+// GET /api/recipe-photo?q=pasta+carbonara
+// Возвращает массив { url, thumb, author, authorUrl } из Unsplash
+app.get('/api/recipe-photo', rateLimit, async (req, res) => {
+  const query = (req.query.q || '').toString().trim().slice(0, 100);
+  if (!query) {
+    return res.status(400).json({ error: 'Параметр q обязателен' });
+  }
+
+  const accessKey = process.env.UNSPLASH_ACCESS_KEY;
+  if (!accessKey) {
+    // Демо-режим — возвращаем пустой массив + предупреждение
+    console.warn('UNSPLASH_ACCESS_KEY не настроен');
+    return res.json({ photos: [], hint: 'API key не настроен' });
+  }
+
+  try {
+    // Unsplash API: ищем по запросу, берём первые 3 фото
+    const url = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=3&orientation=landscape`;
+    const r = await fetch(url, {
+      headers: {
+        'Authorization': `Client-ID ${accessKey}`,
+        'Accept-Version': 'v1',
+      },
+    });
+
+    if (!r.ok) {
+      console.error('Unsplash error:', r.status, r.statusText);
+      return res.status(502).json({ error: 'Не удалось получить фото', photos: [] });
+    }
+
+    const data = await r.json();
+    const photos = (data.results || []).slice(0, 3).map(p => ({
+      url: p.urls?.regular || p.urls?.small,
+      thumb: p.urls?.thumb,
+      author: p.user?.name || 'Unsplash',
+      authorUrl: p.user?.links?.html || 'https://unsplash.com',
+      // Unsplash требует трекинг скачиваний для атрибуции
+      downloadLocation: p.links?.download_location,
+    }));
+
+    res.json({ photos, query });
+  } catch (e) {
+    console.error('recipe-photo error:', e);
+    res.status(500).json({ error: e.message || 'Ошибка', photos: [] });
+  }
+});
+
 // === Запуск ===
 app.listen(PORT, () => {
   console.log(`🌿 Virtual Fridge backend запущен на порту ${PORT}`);
   console.log(`   Health: http://localhost:${PORT}/health`);
   console.log(`   GigaChat key: ${process.env.GIGACHAT_AUTH_KEY ? 'настроен ✓' : 'НЕ НАСТРОЕН ✗'}`);
+  console.log(`   Unsplash key: ${process.env.UNSPLASH_ACCESS_KEY ? 'настроен ✓' : 'не настроен (фото блюд недоступны)'}`);
   console.log(`   Sheets webhook: ${process.env.GOOGLE_SHEETS_WEBHOOK_URL ? 'настроен ✓' : 'не настроен (фидбек будет только в логах)'}`);
 });
